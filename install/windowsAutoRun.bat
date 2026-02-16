@@ -71,6 +71,8 @@ IF EXIST bot_venv\ (
 	echo Don't worry, we will get that resolved for you now.
 	timeout 5
 	winget install -e python3
+	winget install -e --id Microsoft.VCRedist.2015+.x86
+	winget install -e --id Microsoft.VCRedist.2015+.x64
 	goto :firstInstall
 	
 :questionVersion
