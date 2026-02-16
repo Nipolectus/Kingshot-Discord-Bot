@@ -15,8 +15,9 @@ IF EXIST main.py (
 )
 
 :firstInstall
-	py --version 3>NUL
-	if errorlevel 1 goto :errorNoPython
+	winget install -e --id Python.Python.3.13 --silent --accept-package-agreements --accept-source-agreements
+	winget install -e --id Microsoft.VCRedist.2015+.x64 --silent --accept-package-agreements --accept-source-agreements
+	winget install -e --id Microsoft.VCRedist.2015+.x86 --silent --accept-package-agreements --accept-source-agreements
 	cls
 	goto :questionVersion
 
