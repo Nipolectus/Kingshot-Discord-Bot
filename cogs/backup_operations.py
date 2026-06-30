@@ -375,6 +375,124 @@ To restore:
             traceback.print_exc()
             return None
 
+    async def perform_restore(self, user_id: str, file: discord.Attachment, password: str = None):
+        """Download a backup ZIP and restore SQLite files from it into db/."""
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Download attachment
+                temp_filepath = os.path.join(temp_dir, file.filename)
+                file_data = await file.read()
+                with open(temp_filepath, 'wb') as f:
+                    f.write(file_data)
+
+                # Extract SQLite files from the ZIP
+                extract_dir = os.path.join(temp_dir, "extracted")
+                os.makedirs(extract_dir, exist_ok=True)
+                sqlite_files = []
+
+                try:
+                    if password:
+                        with pyzipper.AESZipFile(temp_filepath, 'r') as zf:
+                            zf.setpassword(password.encode())
+                            for name in zf.namelist():
+                                if name.endswith('.sqlite'):
+                                    zf.extract(name, extract_dir)
+                                    sqlite_files.append(name)
+                    else:
+                        with zipfile.ZipFile(temp_filepath, 'r') as zf:
+                            for name in zf.namelist():
+                                if name.endswith('.sqlite'):
+                                    zf.extract(name, extract_dir)
+                                    sqlite_files.append(name)
+                except RuntimeError as e:
+                    if "password" in str(e).lower() or "encrypted" in str(e).lower():
+                        return {'success': False, 'error': "Wrong password or the backup is encrypted. Please provide the correct password."}
+                    return {'success': False, 'error': f"Failed to extract backup: {e}"}
+                except Exception as e:
+                    return {'success': False, 'error': f"Failed to extract backup: {e}"}
+
+                if not sqlite_files:
+                    return {'success': False, 'error': "No SQLite database files found in the backup ZIP!"}
+
+                # Create a safety backup of the current data before overwriting
+                safety_backup = await self.create_backup(user_id, "PreRestore", save_locally=True)
+
+                # Copy extracted files into db/
+                os.makedirs("db", exist_ok=True)
+                restored_files = []
+                for sqlite_file in sqlite_files:
+                    src = os.path.join(extract_dir, sqlite_file)
+                    basename = os.path.basename(sqlite_file)
+                    dst = os.path.join("db", basename)
+                    shutil.copy2(src, dst)
+                    restored_files.append(basename)
+
+                self.log_backup(user_id, True, "Restore", "File Upload", file.filename)
+
+                return {
+                    'success': True,
+                    'restored_files': restored_files,
+                    'safety_backup': safety_backup
+                }
+
+        except Exception as e:
+            print(f"Restore error: {e}")
+            traceback.print_exc()
+            self.log_backup(user_id, False, "Restore", "File Upload", file.filename if file else None, str(e))
+            return {'success': False, 'error': str(e)}
+
+    @discord.app_commands.command(
+        name="restore_backup",
+        description="Restore bot data from a backup ZIP file (Global Admin only)"
+    )
+    @discord.app_commands.describe(
+        file="The backup ZIP file to restore from",
+        password="Password if the backup is encrypted (leave empty if not encrypted)"
+    )
+    async def restore_backup_command(self, interaction: discord.Interaction, file: discord.Attachment, password: str = None):
+        is_admin, is_global = PermissionManager.is_admin(interaction.user.id)
+        if not is_admin or not is_global:
+            await interaction.response.send_message(
+                "❌ This command is only available for Global Admins!",
+                ephemeral=True
+            )
+            return
+
+        if not file.filename.endswith('.zip'):
+            await interaction.response.send_message(
+                "❌ Please provide a valid ZIP backup file (.zip)!",
+                ephemeral=True
+            )
+            return
+
+        if file.size > 50 * 1024 * 1024:
+            await interaction.response.send_message(
+                "❌ File too large! Maximum supported size is 50 MB.",
+                ephemeral=True
+            )
+            return
+
+        embed = discord.Embed(
+            title="⚠️ Restore Backup – Confirmation",
+            description=(
+                f"**⚠️ This will overwrite your current database files!**\n\n"
+                f"📁 **File:** `{file.filename}`\n"
+                f"📊 **Size:** {file.size / 1024 / 1024:.2f} MB\n"
+                f"🔐 **Password:** {'Provided' if password else 'None (unencrypted)'}\n\n"
+                f"**Files that will be restored (if present in backup):**\n"
+                f"• `users.sqlite` – User data\n"
+                f"• `alliance.sqlite` – Alliance data\n"
+                f"• `settings.sqlite` – Bot settings & admin config\n"
+                f"• All other `.sqlite` files found in the backup\n\n"
+                f"✅ **A safety backup of your current data will be created automatically before restoring.**\n\n"
+                f"**Are you sure you want to proceed?**"
+            ),
+            color=discord.Color.orange()
+        )
+
+        view = RestoreConfirmView(self, interaction.user.id, file, password)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
     async def cleanup_old_backups(self, backup_type: str, keep: int = 2):
         """Clean up old local backups, keeping only the most recent ones"""
         try:
@@ -468,6 +586,24 @@ class BackupView(discord.ui.View):
 
         view = BackupManageView(self.cog)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="Restore Backup", emoji="📥", style=discord.ButtonStyle.danger, row=1)
+    async def restore_backup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="📥 Restore Backup",
+            description=(
+                "To restore a backup, use the slash command:\n\n"
+                "**`/restore_backup`**\n\n"
+                "**Parameters:**\n"
+                "• `file` – Attach your backup `.zip` file\n"
+                "• `password` *(optional)* – Password if the backup is encrypted\n\n"
+                "The command will restore all `.sqlite` database files found in the backup "
+                "(users, alliances, settings, and more).\n\n"
+                "✅ A safety backup of your current data is created automatically before any files are overwritten."
+            ),
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Main Menu", emoji="🏠", style=discord.ButtonStyle.secondary, row=1)
     async def main_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -595,6 +731,54 @@ class BackupManageView(discord.ui.View):
         )
         
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+class RestoreConfirmView(discord.ui.View):
+    def __init__(self, cog, user_id: int, file: discord.Attachment, password: str = None):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.user_id = user_id
+        self.file = file
+        self.password = password
+
+    @discord.ui.button(label="Confirm Restore", emoji="✅", style=discord.ButtonStyle.danger)
+    async def confirm_restore(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your menu!", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        result = await self.cog.perform_restore(str(self.user_id), self.file, self.password)
+
+        if result['success']:
+            files_list = "\n".join(f"• `{f}`" for f in result['restored_files'])
+            embed = discord.Embed(
+                title="✅ Restore Successful",
+                description=(
+                    f"**Backup restored successfully!**\n\n"
+                    f"**Restored files:**\n{files_list}\n\n"
+                    f"**Safety backup created:** `{result.get('safety_backup', 'N/A')}`\n\n"
+                    f"⚠️ **Please restart the bot for all changes to take full effect.**"
+                ),
+                color=discord.Color.green()
+            )
+        else:
+            embed = discord.Embed(
+                title="❌ Restore Failed",
+                description=f"**Error:** {result['error']}",
+                color=discord.Color.red()
+            )
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.secondary)
+    async def cancel_restore(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ This is not your menu!", ephemeral=True)
+            return
+
+        await interaction.response.send_message("❌ Restore cancelled.", ephemeral=True)
+
 
 class BackupPasswordModal(discord.ui.Modal, title="Set Backup Password"):
     def __init__(self, cog):

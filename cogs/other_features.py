@@ -40,6 +40,7 @@ class OtherFeatures(commands.Cog):
                     "💾 **Backup System**\n"
                     "└ Automatic database backup\n"
                     "└ Send backups to your DMs\n"
+                    "└ Restore from backup file (/restore_backup)\n"
                     "└ Only for Global Admin\n"
                     "━━━━━━━━━━━━━━━━━━━━━━"
                 ),
