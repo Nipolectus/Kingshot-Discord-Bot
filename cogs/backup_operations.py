@@ -15,6 +15,10 @@ class BackupOperations(commands.Cog):
         self.bot = bot
         self.db_path = "db/backup.sqlite"
         self.backup_dir = "backups"
+        # Optional off-device backup destination (e.g. mounted USB stick or NAS).
+        # Write the target directory path into this file to enable; leave the
+        # file absent to disable.
+        self.external_config_path = "external_backup_dir.txt"
         self.log_path = "log/backuplog.txt"
         os.makedirs("log", exist_ok=True)
         os.makedirs(self.backup_dir, exist_ok=True)
@@ -185,6 +189,43 @@ class BackupOperations(commands.Cog):
         view = BackupView(self)
         await interaction.response.edit_message(embed=embed, view=view)
 
+    def get_external_backup_dir(self):
+        """Read the optional off-device backup directory from external_backup_dir.txt.
+
+        Returns None when unconfigured. The directory must already exist (so we
+        never create and write to an unmounted mount point on the SD card)."""
+        try:
+            if not os.path.exists(self.external_config_path):
+                return None
+            with open(self.external_config_path, "r", encoding="utf-8") as f:
+                path = f.read().strip()
+            if not path:
+                return None
+            if not os.path.isdir(path):
+                print(f"External backup dir '{path}' does not exist or is not mounted - skipping external copy")
+                return None
+            return path
+        except Exception as e:
+            print(f"Error reading external backup dir config: {e}")
+            return None
+
+    def copy_backup_to_external(self, filepath):
+        """Copy a local backup zip off-device and prune old automatic copies there."""
+        external_dir = self.get_external_backup_dir()
+        if not external_dir:
+            return
+        try:
+            shutil.copy2(filepath, external_dir)
+            # Keep the newest 10 automatic backups externally; manual backups are kept
+            automatic_backups = sorted(
+                (os.path.join(external_dir, f) for f in os.listdir(external_dir)
+                 if f.startswith("automatic_") and f.endswith(".zip")),
+                key=os.path.getmtime, reverse=True)
+            for old_file in automatic_backups[10:]:
+                os.remove(old_file)
+        except Exception as e:
+            print(f"Error copying backup to external dir: {e}")
+
     def get_backup_files(self):
         """Get list of all local backup files"""
         backup_files = []
@@ -196,8 +237,21 @@ class BackupOperations(commands.Cog):
             pass
         return sorted(backup_files, key=os.path.getmtime, reverse=True)
 
+    def checkpoint_databases(self):
+        """Flush WAL journals into the main .sqlite files so a file-copy backup
+        contains all committed data (the backup only zips the .sqlite files)."""
+        for file in os.listdir("db"):
+            if file.endswith(".sqlite"):
+                try:
+                    conn = sqlite3.connect(os.path.join("db", file), timeout=10.0)
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    conn.close()
+                except Exception as e:
+                    print(f"WAL checkpoint failed for {file}: {e}")
+
     async def create_backup(self, user_id: str, backup_type: str = "Manual", save_locally: bool = True):
         try:
+            self.checkpoint_databases()
             # Get password
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -236,6 +290,7 @@ Encryption: AES (Password Protected)
 To restore:
 1. Extract this ZIP file using your backup password
 2. Replace your db/ folder contents with these files
+   (also delete any leftover *.sqlite-wal / *.sqlite-shm files)
 3. Restart the bot
 
 🤖 Kingshot Discord Bot Backup System
@@ -262,12 +317,14 @@ Contains: All SQLite database files
 To restore:
 1. Extract this ZIP file
 2. Replace your db/ folder contents with these files
+   (also delete any leftover *.sqlite-wal / *.sqlite-shm files)
 3. Restart the bot
 
 🤖 Kingshot Discord Bot Backup System
 """
                         zf.writestr("README.txt", readme_content)
-                
+
+                self.copy_backup_to_external(filepath)
                 return filename
             
             else:
@@ -297,6 +354,7 @@ Encryption: AES (Password Protected)
 To restore:
 1. Extract this ZIP file using your backup password
 2. Replace your db/ folder contents with these files
+   (also delete any leftover *.sqlite-wal / *.sqlite-shm files)
 3. Restart the bot
 
 ⚠️ This backup expires in 30 days from Discord
@@ -325,6 +383,7 @@ Contains: All SQLite database files
 To restore:
 1. Extract this ZIP file
 2. Replace your db/ folder contents with these files
+   (also delete any leftover *.sqlite-wal / *.sqlite-shm files)
 3. Restart the bot
 
 ⚠️ This backup expires in 30 days from Discord
@@ -425,6 +484,12 @@ To restore:
                     basename = os.path.basename(sqlite_file)
                     dst = os.path.join("db", basename)
                     shutil.copy2(src, dst)
+                    # Remove stale WAL/SHM journals so the old database's
+                    # uncheckpointed changes can't mix with the restored file
+                    for journal_suffix in ("-wal", "-shm"):
+                        journal_path = dst + journal_suffix
+                        if os.path.exists(journal_path):
+                            os.remove(journal_path)
                     restored_files.append(basename)
 
                 self.log_backup(user_id, True, "Restore", "File Upload", file.filename)

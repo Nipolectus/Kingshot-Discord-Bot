@@ -7,7 +7,6 @@ import asyncio
 import time
 import hashlib
 import aiohttp
-import ssl
 from discord.ext import tasks
 from .permission_handler import PermissionManager
 
@@ -205,11 +204,7 @@ class IDChannel(commands.Cog):
                     form = f"sign={sign}&{form}"
                     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
 
-                    ssl_context = ssl.create_default_context()
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_NONE
-
-                    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+                    async with aiohttp.ClientSession() as session:
                         async with session.post('https://kingshot-giftcode.centurygame.com/api/player', headers=headers, data=form) as response:
                             if response.status == 429:
                                 if attempt < max_retries - 1:

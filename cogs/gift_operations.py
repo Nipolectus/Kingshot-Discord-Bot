@@ -1,8 +1,6 @@
 import discord
 from discord.ext import commands
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import aiohttp
 import hashlib
 import json
 from datetime import datetime
@@ -137,12 +135,12 @@ class GiftOperations(commands.Cog):
         self.wos_giftcode_redemption_url = "https://kingshot-giftcode.centurygame.com"
         self.wos_encrypt_key = "mN4!pQs6JrYwV9"
         
-        self.retry_config = Retry(
-            total=10,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["POST", "GET"]
-        )
+        # Retry policy for game API calls (async replacement for the old
+        # blocking urllib3 Retry config; retries no longer freeze the event loop)
+        self.api_max_retries = 10
+        self.api_backoff_factor = 0.5
+        self.api_retry_statuses = {429, 500, 502, 503, 504}
+        self._http_session = None
 
         # Initialization of Locks and Cooldowns
         self._validation_lock = asyncio.Lock()
@@ -700,11 +698,9 @@ class GiftOperations(commands.Cog):
         try:
             self.logger.info(f"Verifying test ID: {fid}")
             
-            session, response_stove_info = self.get_stove_info_wos(player_id=fid)
-            
-            try:
-                player_info_json = response_stove_info.json()
-            except json.JSONDecodeError:
+            _, player_info_json, _ = await self.get_stove_info_wos(player_id=fid)
+
+            if player_info_json is None:
                 self.logger.error(f"Invalid JSON response when verifying ID {fid}")
                 return False, "Invalid response from server"
             
@@ -1004,10 +1000,44 @@ class GiftOperations(commands.Cog):
         except Exception as e:
             self.logger.exception(f"GiftOps: Error in batch_process_alliance_results: {e}")
 
-    def get_stove_info_wos(self, player_id):
-        session = requests.Session()
-        session.mount("https://", HTTPAdapter(max_retries=self.retry_config))
+    async def get_http_session(self):
+        """Shared aiohttp session for game API calls."""
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+        return self._http_session
 
+    async def post_with_retry(self, url, data, headers=None):
+        """POST to the game API, retrying transient failures with backoff.
+
+        Returns (status_code, json_or_None, response_text)."""
+        session = await self.get_http_session()
+        last_result = (0, None, "")
+        last_exception = None
+        for attempt in range(self.api_max_retries + 1):
+            if attempt:
+                await asyncio.sleep(min(self.api_backoff_factor * (2 ** (attempt - 1)), 30))
+            try:
+                async with session.post(url, data=data, headers=headers) as response:
+                    text = await response.text()
+                    try:
+                        response_json = json.loads(text)
+                    except json.JSONDecodeError:
+                        response_json = None
+                    last_result = (response.status, response_json, text)
+                    last_exception = None
+                    if response.status not in self.api_retry_statuses:
+                        return last_result
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_exception = e
+        if last_exception is not None:
+            raise last_exception
+        return last_result
+
+    async def cog_unload(self):
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+
+    async def get_stove_info_wos(self, player_id):
         headers = {
             "accept": "application/json, text/plain, */*",
             "content-type": "application/x-www-form-urlencoded",
@@ -1019,18 +1049,13 @@ class GiftOperations(commands.Cog):
             "time": f"{int(datetime.now().timestamp())}",
         }
         data = self.encode_data(data_to_encode)
-        
-        response_stove_info = session.post(
-            self.wos_player_info_url,
-            headers=headers,
-            data=data,
-        )
-        return session, response_stove_info
 
-    async def attempt_gift_code_with_api(self, player_id, giftcode, session):
+        return await self.post_with_retry(self.wos_player_info_url, data=data, headers=headers)
+
+    async def attempt_gift_code_with_api(self, player_id, giftcode):
         """Attempt to redeem a gift code directly without captcha (Kingshot version)."""
         self.logger.info(f"GiftOps: Attempting gift code redemption for ID {player_id} (no captcha required)")
-        
+
         # Submit gift code directly without captcha
         data_to_encode = {
             "fid": f"{player_id}",
@@ -1038,18 +1063,17 @@ class GiftOperations(commands.Cog):
             "time": f"{int(datetime.now().timestamp()*1000)}"
         }
         data = self.encode_data(data_to_encode)
-        
+
         # Submit to gift code API
-        response_giftcode = session.post(self.wos_giftcode_url, data=data)
-        
+        status_code, response_json_redeem, response_text = await self.post_with_retry(self.wos_giftcode_url, data=data)
+
         # Log the redemption attempt
         log_entry_redeem = f"\n{datetime.now()} API REQ - Gift Code Redeem\nID:{player_id}, Code:{giftcode}\n"
-        try:
-            response_json_redeem = response_giftcode.json()
-            log_entry_redeem += f"Resp Code: {response_giftcode.status_code}\nResponse JSON:\n{json.dumps(response_json_redeem, indent=2)}\n"
-        except json.JSONDecodeError:
+        if response_json_redeem is not None:
+            log_entry_redeem += f"Resp Code: {status_code}\nResponse JSON:\n{json.dumps(response_json_redeem, indent=2)}\n"
+        else:
             response_json_redeem = {}
-            log_entry_redeem += f"Resp Code: {response_giftcode.status_code}\nResponse Text (Not JSON): {response_giftcode.text[:500]}...\n"
+            log_entry_redeem += f"Resp Code: {status_code}\nResponse Text (Not JSON): {response_text[:500]}...\n"
         log_entry_redeem += "-" * 50 + "\n"
         self.giftlog.info(log_entry_redeem.strip())
         
@@ -1109,20 +1133,17 @@ class GiftOperations(commands.Cog):
                         self.logger.info(f"CACHE HIT - User {player_id} code '{giftcode}' status: {existing_record[0]}")
                         return existing_record[0]
 
-            # Get player session
-            session, response_stove_info = self.get_stove_info_wos(player_id=player_id)
+            # Get player info
+            player_status_code, player_info_json, player_info_text = await self.get_stove_info_wos(player_id=player_id)
             log_entry_player = f"\n{datetime.now()} API REQUEST - Player Info\nPlayer ID: {player_id}\n"
-            try:
-                response_json_player = response_stove_info.json()
-                log_entry_player += f"Response Code: {response_stove_info.status_code}\nResponse JSON:\n{json.dumps(response_json_player, indent=2)}\n"
-            except json.JSONDecodeError:
-                log_entry_player += f"Response Code: {response_stove_info.status_code}\nResponse Text (Not JSON): {response_stove_info.text[:500]}...\n"
+            if player_info_json is not None:
+                log_entry_player += f"Response Code: {player_status_code}\nResponse JSON:\n{json.dumps(player_info_json, indent=2)}\n"
+            else:
+                log_entry_player += f"Response Code: {player_status_code}\nResponse Text (Not JSON): {player_info_text[:500]}...\n"
             log_entry_player += "-" * 50 + "\n"
             self.giftlog.info(log_entry_player.strip())
 
-            try:
-                player_info_json = response_stove_info.json()
-            except json.JSONDecodeError:
+            if player_info_json is None:
                 player_info_json = {}
             login_successful = player_info_json.get("msg") == "success"
 
@@ -1135,9 +1156,7 @@ class GiftOperations(commands.Cog):
             # Try gift code redemption
             self.logger.info(f"GiftOps: Starting gift code redemption for ID {player_id}")
             
-            status, _, _, _ = await self.attempt_gift_code_with_api(
-                player_id, giftcode, session
-            )
+            status, _, _, _ = await self.attempt_gift_code_with_api(player_id, giftcode)
 
             # Handle database updates for successful redemptions
             if player_id != self.get_test_fid() and status in ["SUCCESS", "RECEIVED", "SAME TYPE EXCHANGE"]:

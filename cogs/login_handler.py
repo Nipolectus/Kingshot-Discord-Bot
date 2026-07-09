@@ -62,11 +62,8 @@ class LoginHandler:
         self._initialized = True
     
     def _create_ssl_context(self):
-        """Create reusable SSL context"""
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        return ssl_context
+        """Create reusable SSL context with certificate verification enabled"""
+        return ssl.create_default_context()
     
     def log_message(self, message: str):
         """Log a message with timestamp"""

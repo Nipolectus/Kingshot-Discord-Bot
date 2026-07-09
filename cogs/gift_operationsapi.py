@@ -51,8 +51,6 @@ class GiftCodeAPI:
         self.conn.commit()
         
         self.ssl_context = ssl.create_default_context()
-        self.ssl_context.check_hostname = False
-        self.ssl_context.verify_mode = ssl.CERT_NONE
         
         self.logger = logging.getLogger("gift_operationsapi")
         

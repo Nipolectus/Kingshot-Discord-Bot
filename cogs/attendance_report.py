@@ -10,6 +10,8 @@ import os
 from .attendance import SessionSelectView
 
 try:
+    import matplotlib
+    matplotlib.use("Agg")  # headless backend; avoids GUI backend probing on servers
     import matplotlib.pyplot as plt
     import matplotlib.font_manager as fm
     import arabic_reshaper

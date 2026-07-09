@@ -478,7 +478,8 @@ class BearTrap(commands.Cog):
             except Exception as e:
                 print(f"Error in notification checker: {e}")
 
-            await asyncio.sleep(0.1)
+            # Notification times are minute-precision; 5s keeps CPU/SQLite load low on small hosts
+            await asyncio.sleep(5)
 
     def get_guild_deletion_settings(self, guild_id: int) -> tuple[bool, int]:
         """Get deletion settings for a guild. Returns (enabled, default_delay_minutes)"""

@@ -485,6 +485,76 @@ if __name__ == "__main__":
         print("Use --beta to get latest development version from main branch.")
         sys.exit(1)
 
+    # One-command install: `sudo python3 main.py` on a systemd Linux host.
+    # The venv and dependencies are already set up by the code above; this step
+    # registers a systemd service running as the invoking (non-root) user.
+    if (sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0
+            and not is_container() and not is_ci_environment() and shutil.which("systemctl")):
+        service_name = "kingshot-bot.service"
+        service_path = f"/etc/systemd/system/{service_name}"
+        bot_dir = os.path.dirname(os.path.abspath(__file__))
+        service_user = os.environ.get("SUDO_USER") or "root"
+
+        if os.path.exists(service_path):
+            print(F.YELLOW + f"{service_name} is already installed. Manage it with:" + R)
+            print(F.CYAN + f"  sudo systemctl status {service_name}" + R)
+            print(F.CYAN + f"  sudo journalctl -u {service_name} -f" + R)
+            print(F.YELLOW + "Not starting a second copy as root. To run manually, stop the service and start the bot without sudo." + R)
+            sys.exit(0)
+
+        try:
+            answer = input("Running as root: install the bot as a systemd service (starts on boot)? [Y/n]: ").strip().lower()
+        except EOFError:
+            answer = "n"
+
+        if answer in ("", "y", "yes"):
+            token_file_path = os.path.join(bot_dir, "bot_token.txt")
+            if not os.path.exists(token_file_path):
+                bot_token_input = input("Enter the bot token: ").strip()
+                with open(token_file_path, "w") as f:
+                    f.write(bot_token_input)
+
+            venv_python = os.path.join(bot_dir, "bot_venv", "bin", "python")
+            if not os.path.exists(venv_python):
+                venv_python = sys.executable
+
+            service_content = f"""[Unit]
+Description=Kingshot Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={service_user}
+WorkingDirectory={bot_dir}
+ExecStart={venv_python} {os.path.join(bot_dir, "main.py")}
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+"""
+            try:
+                with open(service_path, "w") as f:
+                    f.write(service_content)
+
+                # The venv/token/db were created by root during this run
+                if service_user != "root":
+                    subprocess.call(["chown", "-R", f"{service_user}:", bot_dir])
+
+                subprocess.check_call(["systemctl", "daemon-reload"])
+                subprocess.check_call(["systemctl", "enable", "--now", service_name])
+                print(F.GREEN + f"Installed and started {service_name} (runs as user '{service_user}')." + R)
+                print(F.CYAN + f"  Logs:   sudo journalctl -u {service_name} -f" + R)
+                print(F.CYAN + f"  Status: sudo systemctl status {service_name}" + R)
+            except Exception as e:
+                print(F.RED + f"Service installation failed: {e}" + R)
+                sys.exit(1)
+            sys.exit(0)
+        else:
+            print(F.YELLOW + "Continuing without service installation (running the bot as root is not recommended)." + R)
+
     def restart_bot():
         python = sys.executable
         script_path = os.path.abspath(sys.argv[0])
@@ -788,13 +858,19 @@ if __name__ == "__main__":
 
     import asyncio
 
-    # Handle update/repair logic
-    if "--repair" in sys.argv:
-        asyncio.run(check_and_update_files())
-    elif "--no-update" in sys.argv:
-        print(F.YELLOW + "Update check skipped due to --no-update flag." + R)
-    else:
-        asyncio.run(check_and_update_files())
+    # AUTO-UPDATE DISABLED for this fork: the updater downloads from the upstream
+    # kingshot-project repo and would overwrite this fork's customized files.
+    # Re-enable (uncomment below) once this fork has its own git infra and update
+    # process. Until then: update manually with git, DR plan is a manual install
+    # plus restoring backups by hand.
+    #
+    # if "--repair" in sys.argv:
+    #     asyncio.run(check_and_update_files())
+    # elif "--no-update" in sys.argv:
+    #     print(F.YELLOW + "Update check skipped due to --no-update flag." + R)
+    # else:
+    #     asyncio.run(check_and_update_files())
+    print(F.YELLOW + "Auto-update is disabled in this fork (manual updates only)." + R)
 
     import discord
     from discord.ext import commands
@@ -844,6 +920,26 @@ if __name__ == "__main__":
     }
 
     connections = {name: sqlite3.connect(path) for name, path in databases.items()}
+
+    # Enable WAL journal mode on every bot database. WAL is a persistent per-file
+    # setting, so setting it once here also covers the short-lived connections the
+    # cogs open. It reduces fsync/write amplification (SD-card wear on a Pi).
+    all_database_files = [
+        "db/alliance.sqlite", "db/giftcode.sqlite", "db/changes.sqlite",
+        "db/users.sqlite", "db/settings.sqlite", "db/attendance.sqlite",
+        "db/beartime.sqlite", "db/svs.sqlite", "db/id_channel.sqlite",
+        "db/backup.sqlite",
+    ]
+    for db_file in all_database_files:
+        try:
+            wal_conn = sqlite3.connect(db_file)
+            wal_conn.execute("PRAGMA journal_mode=WAL")
+            wal_conn.close()
+        except sqlite3.Error as e:
+            print(F.YELLOW + f"Could not enable WAL on {db_file}: {e}" + R)
+
+    for conn in connections.values():
+        conn.execute("PRAGMA synchronous=NORMAL")
 
     print(F.GREEN + "Database connections have been successfully established." + R)
 

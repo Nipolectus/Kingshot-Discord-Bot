@@ -54,67 +54,39 @@ On first start, the bot will:
 - Ask you to enter your **bot token** (saved to `bot_token.txt` for future starts).
 - Create the `db/` folder and all required database tables.
 
-To skip the update prompt on every start, use `--autoupdate`:
-
-```bash
-python3 main.py --autoupdate
-```
+> **Note:** Auto-update is disabled in this fork (it would overwrite the fork's custom code with upstream files). Update manually with `git pull`. The `--autoupdate`, `--no-update`, `--repair` and `--beta` flags therefore have no effect.
 
 Other useful flags:
 
 | Flag | Description |
 |---|---|
-| `--autoupdate` | Accept updates without prompting |
-| `--no-update` | Skip the update check entirely |
-| `--repair` | Force re-download and reinstall all bot files |
-| `--beta` | Use the latest development version from the `main` branch |
 | `--no-venv` | Skip virtual environment creation (use system Python) |
 
 ---
 
-### Option 2 – Linux VPS with systemd service (runs on boot, auto-restarts)
+### Option 2 – Linux / Raspberry Pi with systemd service (runs on boot, auto-restarts)
 
-Use this to run the bot as a background service that starts automatically when the server boots.
-
-```bash
-# 1. Create the bot directory and clone the repository
-mkdir -p /home/$USER/kingshot-bot
-git clone https://github.com/kingshot-project/Kingshot-Discord-Bot.git /home/$USER/kingshot-bot
-cd /home/$USER/kingshot-bot
-
-# 2. First run to create venv, install deps, and save token
-python3 main.py --no-update
-# Enter your bot token when prompted, then stop the bot with Ctrl+C
-
-# 3. Install the systemd service
-sudo cp install/kingshot-bot.service /etc/systemd/system/kingshot-bot.service
-```
-
-Edit the service file to match your username and directory:
+One command sets up everything — venv, dependencies, token, and the systemd service:
 
 ```bash
-sudo nano /etc/systemd/system/kingshot-bot.service
-```
+# 1. Clone the repository
+git clone https://github.com/Nipolectus/Kingshot-Discord-Bot.git kingshot-bot
+cd kingshot-bot
 
-```ini
-[Service]
-User=YOUR_USERNAME
-WorkingDirectory=/home/YOUR_USERNAME/kingshot-bot
-ExecStart=/home/YOUR_USERNAME/kingshot-bot/bot_venv/bin/python main.py --autoupdate
+# 2. Run the installer (creates venv, installs deps, asks for token,
+#    then installs and starts the systemd service as your user)
+sudo python3 main.py
 ```
 
 ```bash
-# 4. Enable and start the service
-sudo systemctl daemon-reload
-sudo systemctl enable kingshot-bot
-sudo systemctl start kingshot-bot
-
 # Check status
 sudo systemctl status kingshot-bot
 
 # View live logs
 sudo journalctl -u kingshot-bot -f
 ```
+
+If you prefer to set the service up manually, run `python3 main.py` once without sudo (creates venv and asks for the token), stop it with Ctrl+C, then copy `install/kingshot-bot.service` to `/etc/systemd/system/`, adjust the `User`, `WorkingDirectory` and `ExecStart` paths, and run `sudo systemctl daemon-reload && sudo systemctl enable --now kingshot-bot`.
 
 ---
 
@@ -190,14 +162,22 @@ kingshot-bot/
 
 ## 💾 Backup & Restore
 
-The bot includes a built-in backup system. See **[BACKUP_GUIDE.md](BACKUP_GUIDE.md)** for the full documentation, including:
+The bot includes a built-in backup system:
 
-- How automatic backups work (every 3 hours, kept locally)
-- How to create a manual backup (to DM or local `backups/` folder)
-- How to enable AES password encryption
-- How to restore from a backup using `/restore_backup`
-- Manual server-side restore steps
-- Docker-specific backup notes
+- Automatic backups run every 3 hours and are kept in the local `backups/` folder (last 2 are kept). Note: a Global Admin must be configured or automatic backups do not run.
+- Manual backups can be created from the backup menu (saved locally or sent via DM).
+- AES password encryption can be enabled per admin in the backup menu.
+- Restore a backup by uploading the ZIP with `/restore_backup`, then restart the bot. This also works for moving data from another instance of this bot to a fresh install.
+
+### Off-device backup copies (recommended on Raspberry Pi / SD cards)
+
+Local backups live on the same disk as the databases, so a disk failure loses both. To automatically copy every local backup to a second location (mounted USB stick, NAS mount, synced cloud folder), create a file named `external_backup_dir.txt` in the bot's root directory containing the target directory path, e.g.:
+
+```
+/mnt/usb-backup/kingshot
+```
+
+The directory must already exist (the bot will not create it, so an unmounted drive is never written to). The newest 10 automatic backups are kept there; manual backups are never pruned.
 
 ---
 

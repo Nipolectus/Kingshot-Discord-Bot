@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/kingshot-bot
-ExecStart=/home/pi/kingshot-bot/bot_venv/bin/python main.py
+# --no-update: auto-update would overwrite this fork's custom cogs with upstream kingshot-project files
+ExecStart=/home/pi/kingshot-bot/bot_venv/bin/python main.py --no-update
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
